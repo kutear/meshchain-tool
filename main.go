@@ -183,7 +183,7 @@ func ExecuteMethod(path, method string, payload, headers map[string]string) (map
 		resp, err := httpClient.Do(req)
 		if err != nil {
 			if strings.Contains(err.Error(), "context deadline exceeded") {
-				log.Printf("请求超时 (第 %d 次尝试). 正在重试...\n", i)
+				logChannel <- fmt.Sprintf("请求超时 (第 %d 次尝试). 正在重试...\n", i)
 				time.Sleep(time.Second * 2) // 等待一段时间后重试
 				continue
 			}
@@ -311,8 +311,7 @@ func CheckJwtTokenExpiration(tokenString string) (bool, error) {
 }
 
 // ProcessAccount 每个账户单独的处理逻辑
-func ProcessAccount(accountIndex int, wg *sync.WaitGroup) {
-	defer wg.Done()
+func ProcessAccount(accountIndex int, buffer *strings.Builder) {
 
 	// 获取最新的 account 数据
 	mu.RLock()
@@ -322,11 +321,11 @@ func ProcessAccount(accountIndex int, wg *sync.WaitGroup) {
 	// access_token 过期则生成新 access_token | refresh_token
 	if valid, err := CheckJwtTokenExpiration(account.AccessToken); err == nil && !valid {
 
-		log.Printf("检查到 [%s] 的 token 过期进行刷新", account.Email)
+		buffer.WriteString(fmt.Sprintf("检查到 [%s] 的 token 过期进行刷新", account.Email))
 
 		newAccessToken, newRefreshToken, err := RefreshToken(account.RefreshToken)
 		if err != nil {
-			log.Printf("[%s] 刷新 token 操作失败,错误提示为: [%v]", account.Email, err)
+			buffer.WriteString(fmt.Sprintf("[%s] 刷新 token 操作失败,错误提示为: [%v]", account.Email, err))
 			return
 		}
 
@@ -335,9 +334,8 @@ func ProcessAccount(accountIndex int, wg *sync.WaitGroup) {
 		account.AccessToken = newAccessToken
 		account.RefreshToken = newRefreshToken
 		account.UpdateTimestamp = time.Now().Format("2006-01-02 15:04:05")
-		if err := UpdateConfig(config.Accounts); err != nil {
-			log.Printf("[%s] 更新配置文件失败: %v", account.Email, err)
-		}
+		// 等待主线程统一更新
+		hasUpdates = true
 		mu.Unlock()
 	}
 
@@ -346,13 +344,13 @@ func ProcessAccount(accountIndex int, wg *sync.WaitGroup) {
 		uniqueId := GenerateHex()
 		err := CreateNode(uniqueId, account.AccessToken)
 		if err != nil {
-			log.Printf("[%s] 生成 node 失败,需要手动处理. err: [%v]", account.Email, err)
+			buffer.WriteString(fmt.Sprintf("[%s] 生成 node 失败,需要手动处理. err: [%v]", account.Email, err))
 			return
 		}
 
 		err = StartNodeReward(uniqueId, account.AccessToken)
 		if err != nil {
-			log.Printf("[%s] 启动 node [%s] 失败,需要手动处理. err: [%v]", account.Email, uniqueId, err)
+			buffer.WriteString(fmt.Sprintf("[%s] 启动 node [%s] 失败,需要手动处理. err: [%v]", account.Email, uniqueId, err))
 			return
 		}
 
@@ -360,9 +358,8 @@ func ProcessAccount(accountIndex int, wg *sync.WaitGroup) {
 		mu.Lock()
 		account.UniqueIds = []string{uniqueId}
 		account.UpdateTimestamp = time.Now().Format("2006-01-02 15:04:05")
-		if err := UpdateConfig(config.Accounts); err != nil {
-			log.Printf("账户 %s: 更新配置文件失败: %v\n", account.Email, err)
-		}
+		// 等待主线程统一更新
+		hasUpdates = true
 		mu.Unlock()
 	}
 
@@ -375,7 +372,7 @@ func ProcessAccount(accountIndex int, wg *sync.WaitGroup) {
 			if strings.Contains(err.Error(), "401") {
 				newAccessToken, newRefreshToken, err := RefreshToken(account.RefreshToken)
 				if err != nil {
-					log.Printf("[%s] 刷新 token 失败: %v", account.Email, err)
+					buffer.WriteString(fmt.Sprintf("[%s] 刷新 token 失败: %v", account.Email, err))
 					continue
 				}
 
@@ -384,39 +381,49 @@ func ProcessAccount(accountIndex int, wg *sync.WaitGroup) {
 				account.AccessToken = newAccessToken
 				account.RefreshToken = newRefreshToken
 				account.UpdateTimestamp = time.Now().Format("2006-01-02 15:04:05")
-				if err := UpdateConfig(config.Accounts); err != nil {
-					log.Printf("[%s] 更新配置文件失败: %v", account.Email, err)
-				}
+				// 等待主线程统一更新
+				hasUpdates = true
 				mu.Unlock()
 
 				// 尝试重新预估奖励
 				value, err = EstimateReward(uniqueId, newAccessToken)
 				if err != nil {
-					log.Printf("[%s] 更新后查询预估奖励失败, [%v]", account.Email, err)
+					buffer.WriteString(fmt.Sprintf("[%s] 更新后查询预估奖励失败, [%v]", account.Email, err))
 					continue
 				}
 			} else {
-				log.Printf("[%s] 查询预估奖励失败, [%v]", account.Email, err)
+				buffer.WriteString(fmt.Sprintf("[%s] 查询预估奖励失败, [%v]", account.Email, err))
 				continue
 			}
 		}
 
 		valueFormat = value
 		if valueFormat == 0 {
-			log.Printf("[%s] 没有可以 claim 的奖励. 错误信息: [%v]\n", account.Email, err)
-		} else if valueFormat <= 10 {
-			log.Printf("[%s] 只有 [%v] 的奖励. 暂不 claim \n", account.Email, valueFormat)
+			buffer.WriteString(fmt.Sprintf("[%s] 没有可以 claim 的奖励. 错误信息: [%v]\n", account.Email, err))
+		} else if valueFormat <= 25.2 {
+			buffer.WriteString(fmt.Sprintf("[%s] 只有 [%v] 的奖励. 暂不 claim \n", account.Email, valueFormat))
 		} else {
 			err := ClaimReward(uniqueId, account.AccessToken)
 			if err != nil {
-				log.Printf("[%s] claim [%v] 奖励失败, 错误: [%v]\n", account.Email, valueFormat, err)
+				buffer.WriteString(fmt.Sprintf("[%s] claim [%v] 奖励失败, 错误: [%v]\n", account.Email, valueFormat, err))
 			} else {
-				log.Printf("[%s] 成功 claim [%v] 奖励\n", account.Email, valueFormat)
+				buffer.WriteString(fmt.Sprintf("[%s] 成功 claim [%v] 奖励\n", account.Email, valueFormat))
 			}
 		}
 	}
 }
 
+// StartLogWorker 日志处理 goroutine
+func StartLogWorker() {
+	go func() {
+		for logMsg := range logChannel {
+			log.Println(logMsg) // 按顺序输出日志
+		}
+	}()
+}
+
+var logChannel = make(chan string, 1000) // 日志队列 容量为1000
+var hasUpdates bool
 var mu sync.RWMutex                // 全局读写锁
 var config *Config                 // 全局配置文件
 var httpClient *http.Client        // 全局 http client
@@ -432,18 +439,58 @@ func main() {
 	config = LoadConfig(configFileName)
 	httpClient = LoadHttpClient()
 
+	// 启动日志处理器
+	StartLogWorker()
+
 	for {
 		var wg sync.WaitGroup
-		log.Printf("Starting to process %d accounts", len(config.Accounts))
+
+		logChannel <- fmt.Sprintf("开始 [%d] 个账号的处理", len(config.Accounts))
+
+		// 每轮处理前重置标志
+		hasUpdates = false
+
+		// 日志缓存 用于按照账号顺序进行日志打印
+		logCache := make([]string, len(config.Accounts))
 
 		for index := range config.Accounts {
 			wg.Add(1)
-			go ProcessAccount(index, &wg)
+			go func() {
+				defer wg.Done()
+				var logBuffer strings.Builder
+
+				ProcessAccount(index, &logBuffer)
+				// 存储日志
+				logCache[index] = logBuffer.String()
+			}()
 		}
 		wg.Wait()
-		log.Printf("[%v] 个账户处理完毕\n", len(config.Accounts))
-		log.Println("----------------------------------")
+
+		// 按照顺序输出日志
+		for _, logMsg := range logCache {
+			logChannel <- logMsg
+		}
+
+		if hasUpdates {
+
+			logChannel <- fmt.Sprintf("有账号更新了数据,开始进行配置文件更新")
+
+			mu.Lock()
+			if err := UpdateConfig(config.Accounts); err != nil {
+				logChannel <- fmt.Sprintf("更新配置文件失败: %v", err)
+			} else {
+				logChannel <- fmt.Sprintf("更新配置文件成功")
+			}
+			mu.Unlock()
+		} else {
+			logChannel <- fmt.Sprintf("没有更新的账号，跳过配置文件更新")
+		}
+
+		logChannel <- fmt.Sprintf("[%v] 个账户处理完毕\n", len(config.Accounts))
+		logChannel <- fmt.Sprint("----------------------------------")
 		time.Sleep(time.Duration(config.Global.RequestInterval) * time.Second)
 	}
 
+	// 关闭日志通道（在程序退出时）
+	close(logChannel)
 }

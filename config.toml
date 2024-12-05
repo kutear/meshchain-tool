@@ -7,4 +7,4 @@ update_timestamp = '' # 用来记录 config.toml 修改时间。
 
 [global]
 base_url = 'https://api.meshchain.ai/meshmain' # 项目方请求地址。写死
-request_interval = 60 # 每次循环间隔 60s 可以修改
+request_interval = 30 # 每次循环间隔 30s 可以修改
