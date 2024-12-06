@@ -400,7 +400,7 @@ func ProcessAccount(accountIndex int, buffer *strings.Builder) {
 		valueFormat = value
 		if valueFormat == 0 {
 			buffer.WriteString(fmt.Sprintf("[%s] 没有可以 claim 的奖励. 错误信息: [%v]\n", account.Email, err))
-		} else if valueFormat <= 25.2 {
+		} else if valueFormat < 25.2 {
 			buffer.WriteString(fmt.Sprintf("[%s] 只有 [%v] 的奖励. 暂不 claim \n", account.Email, valueFormat))
 		} else {
 			err := ClaimReward(uniqueId, account.AccessToken)
